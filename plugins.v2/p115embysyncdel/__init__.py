@@ -21,7 +21,7 @@ class P115EmbySyncDel(_PluginBase):
     plugin_name = "115 Emby 联动删除"
     plugin_desc = "通过神医助手删除 Emby 媒体时，同步删除 115 文件与 MoviePilot 整理记录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png"
-    plugin_version = "0.1.4"
+    plugin_version = "0.1.5"
     plugin_author = "Codex"
     author_url = "https://openai.com"
     plugin_config_prefix = "p115embysyncdel_"
@@ -441,14 +441,21 @@ class P115EmbySyncDel(_PluginBase):
             return schemas.Response(success=True, message=f"忽略事件：{event_name or 'unknown'}")
 
         if not self._enabled:
+            logger.info("【115 Emby 联动删除】插件未启用，忽略事件")
             return schemas.Response(success=True, message="插件未启用，事件已忽略")
 
         media_server = self._extract_media_server(event_data)
         if self._mediaservers and media_server not in self._mediaservers:
+            logger.info(
+                "【115 Emby 联动删除】媒体服务器不匹配，当前=%s，配置=%s",
+                media_server or "未知",
+                ",".join(self._mediaservers),
+            )
             return schemas.Response(success=True, message=f"媒体服务器不匹配：{media_server or '未知'}")
 
         media_type = self._extract_media_type(event_data)
         if media_type not in {"Movie", "MOV"}:
+            logger.info("【115 Emby 联动删除】当前仅处理电影，跳过类型：%s", media_type or "unknown")
             return schemas.Response(success=True, message=f"当前仅处理电影，已忽略：{media_type or 'unknown'}")
 
         media_name = self._extract_media_name(event_data)
@@ -456,11 +463,24 @@ class P115EmbySyncDel(_PluginBase):
         tmdb_id = self._extract_tmdb_id(event_data)
 
         if not emby_path:
+            logger.warning("【115 Emby 联动删除】Webhook 缺少媒体路径")
             return schemas.Response(success=False, message="缺少 item_path，无法处理")
 
         if self._emby_library_path and not self._has_prefix(emby_path, self._emby_library_path):
+            logger.info(
+                "【115 Emby 联动删除】路径不在目标媒体库内，当前=%s，配置前缀=%s",
+                emby_path,
+                self._emby_library_path,
+            )
             return schemas.Response(success=True, message="路径不在目标媒体库内，已忽略")
 
+        logger.info(
+            "【115 Emby 联动删除】开始处理删除事件：name=%s, path=%s, tmdb=%s, server=%s",
+            media_name or "unknown",
+            emby_path,
+            tmdb_id or "unknown",
+            media_server or "unknown",
+        )
         self._handle_movie_delete(
             media_name=media_name,
             emby_path=emby_path,
