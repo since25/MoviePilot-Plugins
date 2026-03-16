@@ -20,7 +20,7 @@ class P115EmbySyncDel(_PluginBase):
     plugin_name = "115 Emby 联动删除"
     plugin_desc = "通过神医助手删除 Emby 媒体时，同步删除 115 文件与 MoviePilot 整理记录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png"
-    plugin_version = "0.1.1"
+    plugin_version = "0.1.2"
     plugin_author = "Codex"
     author_url = "https://openai.com"
     plugin_config_prefix = "p115embysyncdel_"
@@ -828,3 +828,7 @@ class P115EmbySyncDel(_PluginBase):
         full_parts = Path(full_path).parts
         prefix_parts = Path(prefix_path).parts
         return len(prefix_parts) <= len(full_parts) and full_parts[: len(prefix_parts)] == prefix_parts
+
+
+# 某些 MoviePilot 运行环境会错误地保留抽象方法标记，这里显式清空以确保插件可实例化。
+P115EmbySyncDel.__abstractmethods__ = frozenset()
