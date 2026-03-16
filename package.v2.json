@@ -255,6 +255,18 @@
       "v2.0": "兼容MoviePilot V2 版本"
     }
   },
+  "P115EmbySyncDel": {
+    "name": "115 Emby 联动删除",
+    "description": "通过神医助手删除 Emby 媒体时，同步删除 115 文件与 MoviePilot 整理记录。",
+    "labels": "媒体库,网盘",
+    "version": "0.1.0",
+    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png",
+    "author": "Codex",
+    "level": 1,
+    "history": {
+      "v0.1.0": "初始版本，支持 Emby 删除电影后联动删除 115 文件与整理记录"
+    }
+  },
   "IYUUAutoSeed": {
     "name": "IYUU自动辅种",
     "description": "基于IYUU官方Api实现自动辅种。",

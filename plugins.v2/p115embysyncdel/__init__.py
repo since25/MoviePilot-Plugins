@@ -59,7 +59,11 @@ class P115EmbySyncDel(_PluginBase):
         self._emby_library_path = (config.get("emby_library_path") or "").strip()
         self._openlist_url_prefix = (config.get("openlist_url_prefix") or "").strip()
         self._p115_storage = (config.get("p115_storage") or "u115").strip() or "u115"
-        self._mediaservers = config.get("mediaservers") or []
+        self._mediaservers = [
+            str(server).strip()
+            for server in (config.get("mediaservers") or [])
+            if str(server).strip()
+        ]
 
         self.update_config(
             {
@@ -70,7 +74,7 @@ class P115EmbySyncDel(_PluginBase):
                 "emby_library_path": self._emby_library_path,
                 "openlist_url_prefix": self._openlist_url_prefix,
                 "p115_storage": self._p115_storage,
-                "mediaservers": self._mediaservers[:1],
+                "mediaservers": self._mediaservers,
             }
         )
 
@@ -347,17 +351,22 @@ class P115EmbySyncDel(_PluginBase):
             return
 
         event_data = event.event_data
-        if not event_data or str(getattr(event_data, "event", "")) != "deep.delete":
+        if not event_data or self._event_value(event_data, "event") != "deep.delete":
             return
 
-        media_type = str(getattr(event_data, "item_type", "") or "")
+        media_server = self._extract_media_server(event_data)
+        if self._mediaservers and media_server not in self._mediaservers:
+            logger.info("【115 Emby 联动删除】媒体服务器不在配置范围内，跳过：%s", media_server or "未知")
+            return
+
+        media_type = self._event_value(event_data, "item_type")
         if media_type not in {"Movie", "MOV"}:
             logger.info("【115 Emby 联动删除】当前版本仅处理电影，跳过类型：%s", media_type)
             return
 
-        media_name = str(getattr(event_data, "item_name", "") or "")
-        emby_path = str(getattr(event_data, "item_path", "") or "").replace("\\", "/")
-        tmdb_id = self._safe_int(getattr(event_data, "tmdb_id", None))
+        media_name = self._event_value(event_data, "item_name")
+        emby_path = self._event_value(event_data, "item_path").replace("\\", "/")
+        tmdb_id = self._safe_int(self._event_raw_value(event_data, "tmdb_id"))
 
         if not emby_path:
             logger.warning("【115 Emby 联动删除】删除事件缺少媒体路径，跳过")
@@ -447,9 +456,13 @@ class P115EmbySyncDel(_PluginBase):
             else:
                 result_parts.append("115 文件删除失败")
 
-        if self._delete_transfer_history:
+        if self._delete_transfer_history and (
+            not self._delete_p115_file or "115 文件已删除" in result_parts
+        ):
             self._transferhis.delete(transfer_history.id)
             result_parts.append("整理记录已删除")
+        elif self._delete_transfer_history:
+            result_parts.append("整理记录未删除")
 
         result_text = "，".join(result_parts) if result_parts else "未执行删除动作"
         logger.info("【115 Emby 联动删除】%s -> %s，结果：%s", emby_path, p115_path, result_text)
@@ -620,6 +633,44 @@ class P115EmbySyncDel(_PluginBase):
             return int(value)
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _event_raw_value(event_data: Any, key: str) -> Any:
+        """
+        兼容对象与字典两种事件载荷访问方式。
+
+        :param event_data: 事件数据。
+        :param key: 字段名。
+        :return: 原始字段值。
+        """
+        if isinstance(event_data, dict):
+            return event_data.get(key)
+        return getattr(event_data, key, None)
+
+    @classmethod
+    def _event_value(cls, event_data: Any, key: str) -> str:
+        """
+        读取事件字段并规整为字符串。
+
+        :param event_data: 事件数据。
+        :param key: 字段名。
+        :return: 字符串值。
+        """
+        return str(cls._event_raw_value(event_data, key) or "")
+
+    @classmethod
+    def _extract_media_server(cls, event_data: Any) -> str:
+        """
+        从事件中提取媒体服务器名称，兼容常见字段命名。
+
+        :param event_data: 事件数据。
+        :return: 媒体服务器名称。
+        """
+        for key in ("media_server", "mediaserver", "server", "server_name"):
+            value = cls._event_value(event_data, key).strip()
+            if value:
+                return value
+        return ""
 
     @staticmethod
     def _has_prefix(full_path: str, prefix_path: str) -> bool:
