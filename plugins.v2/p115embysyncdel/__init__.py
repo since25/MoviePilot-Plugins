@@ -1,5 +1,6 @@
 import time
 import json
+from urllib import request as urllib_request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote, urlparse
@@ -21,7 +22,7 @@ class P115EmbySyncDel(_PluginBase):
     plugin_name = "115 Emby 联动删除"
     plugin_desc = "通过神医助手删除 Emby 媒体时，同步删除 115 文件与 MoviePilot 整理记录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png"
-    plugin_version = "0.1.6"
+    plugin_version = "0.1.7"
     plugin_author = "Codex"
     author_url = "https://openai.com"
     plugin_config_prefix = "p115embysyncdel_"
@@ -34,6 +35,8 @@ class P115EmbySyncDel(_PluginBase):
     _delete_p115_file = True
     _emby_library_path = ""
     _openlist_url_prefix = ""
+    _openlist_api_url = ""
+    _openlist_token = ""
     _p115_storage = "u115"
     _mediaservers: List[str] = []
 
@@ -62,6 +65,8 @@ class P115EmbySyncDel(_PluginBase):
         self._delete_p115_file = bool(config.get("delete_p115_file", True))
         self._emby_library_path = (config.get("emby_library_path") or "").strip()
         self._openlist_url_prefix = (config.get("openlist_url_prefix") or "").strip()
+        self._openlist_api_url = (config.get("openlist_api_url") or "").strip()
+        self._openlist_token = (config.get("openlist_token") or "").strip()
         self._p115_storage = (config.get("p115_storage") or "u115").strip() or "u115"
         self._mediaservers = [
             str(server).strip()
@@ -77,6 +82,8 @@ class P115EmbySyncDel(_PluginBase):
                 "delete_p115_file": self._delete_p115_file,
                 "emby_library_path": self._emby_library_path,
                 "openlist_url_prefix": self._openlist_url_prefix,
+                "openlist_api_url": self._openlist_api_url,
+                "openlist_token": self._openlist_token,
                 "p115_storage": self._p115_storage,
                 "mediaservers": self._mediaservers,
             }
@@ -244,6 +251,34 @@ class P115EmbySyncDel(_PluginBase):
                                             }
                                         ],
                                     },
+                                    {
+                                        "component": "VCol",
+                                        "props": {"cols": 12},
+                                        "content": [
+                                            {
+                                                "component": "VTextField",
+                                                "props": {
+                                                    "model": "openlist_api_url",
+                                                    "label": "OpenList API 地址",
+                                                    "placeholder": "http://192.168.70.138:5244",
+                                                },
+                                            }
+                                        ],
+                                    },
+                                    {
+                                        "component": "VCol",
+                                        "props": {"cols": 12},
+                                        "content": [
+                                            {
+                                                "component": "VTextField",
+                                                "props": {
+                                                    "model": "openlist_token",
+                                                    "label": "OpenList Token",
+                                                    "type": "password",
+                                                },
+                                            }
+                                        ],
+                                    },
                                 ],
                             },
                             {
@@ -291,6 +326,8 @@ class P115EmbySyncDel(_PluginBase):
             "delete_p115_file": True,
             "emby_library_path": "",
             "openlist_url_prefix": "",
+            "openlist_api_url": "",
+            "openlist_token": "",
             "p115_storage": "u115",
             "mediaservers": [],
         }
@@ -566,10 +603,17 @@ class P115EmbySyncDel(_PluginBase):
             return
 
         logger.info("【115 Emby 联动删除】还原 115 路径：%s", p115_path)
+        openlist_api_path = self._convert_openlist_url_to_api_path(openlist_url)
+        if openlist_api_path:
+            logger.info("【115 Emby 联动删除】还原 OpenList API 路径：%s", openlist_api_path)
         result_parts: List[str] = []
         if self._delete_p115_file:
             logger.info("【115 Emby 联动删除】开始删除 115 文件：%s", p115_path)
-            if self._delete_p115_file_item(media_name=media_name, p115_path=p115_path):
+            if self._delete_p115_file_item(
+                media_name=media_name,
+                p115_path=p115_path,
+                openlist_api_path=openlist_api_path,
+            ):
                 result_parts.append("115 文件已删除")
             else:
                 result_parts.append("115 文件删除失败")
@@ -681,14 +725,46 @@ class P115EmbySyncDel(_PluginBase):
             pan_path = f"/{pan_path}"
         return pan_path or None
 
-    def _delete_p115_file_item(self, media_name: str, p115_path: str) -> bool:
+    @staticmethod
+    def _convert_openlist_url_to_api_path(openlist_url: str) -> Optional[str]:
+        """
+        将 OpenList URL 还原为 OpenList API 路径。
+
+        :param openlist_url: STRM 中的 OpenList URL。
+        :return: OpenList API 路径。
+        """
+        target = openlist_url.strip()
+        if not target:
+            return None
+        parsed = urlparse(target)
+        raw_path = unquote(parsed.path or "").strip()
+        if not raw_path:
+            return None
+        if raw_path.startswith("/d/"):
+            return raw_path[2:]
+        if raw_path == "/d":
+            return "/"
+        return raw_path
+
+    def _delete_p115_file_item(
+        self,
+        media_name: str,
+        p115_path: str,
+        openlist_api_path: Optional[str] = None,
+    ) -> bool:
         """
         删除 115 文件或目录。
 
         :param media_name: 媒体名称。
         :param p115_path: 115 网盘路径。
+        :param openlist_api_path: OpenList API 路径。
         :return: 是否删除成功。
         """
+        if openlist_api_path and self._openlist_api_url and self._openlist_token:
+            if self._delete_via_openlist_api(media_name=media_name, openlist_api_path=openlist_api_path):
+                return True
+            logger.warning("【115 Emby 联动删除】OpenList API 删除失败，回退 StorageChain：%s", openlist_api_path)
+
         try:
             fileitem = self._storagechain.get_file_item(
                 storage=self._p115_storage,
@@ -705,6 +781,39 @@ class P115EmbySyncDel(_PluginBase):
             return True
         except Exception as err:
             logger.error("【115 Emby 联动删除】删除 115 文件失败：%s", err, exc_info=True)
+            return False
+
+    def _delete_via_openlist_api(self, media_name: str, openlist_api_path: str) -> bool:
+        """
+        通过 OpenList API 删除文件。
+
+        :param media_name: 媒体名称。
+        :param openlist_api_path: OpenList API 路径。
+        :return: 是否删除成功。
+        """
+        base_url = self._openlist_api_url.rstrip("/")
+        target_path = openlist_api_path.rstrip("/")
+        parent_dir = str(Path(target_path).parent).replace("\\", "/")
+        file_name = Path(target_path).name
+        payload = json.dumps({"dir": parent_dir, "names": [file_name]}).encode("utf-8")
+        headers = {
+            "Authorization": self._openlist_token,
+            "Content-Type": "application/json",
+        }
+        api_url = f"{base_url}/api/fs/remove"
+        try:
+            req = urllib_request.Request(api_url, data=payload, headers=headers, method="POST")
+            with urllib_request.urlopen(req, timeout=30) as resp:
+                body = resp.read().decode("utf-8", errors="ignore")
+            logger.info(
+                "【115 Emby 联动删除】%s 通过 OpenList API 删除成功：%s，响应：%s",
+                media_name,
+                target_path,
+                body,
+            )
+            return True
+        except Exception as err:
+            logger.error("【115 Emby 联动删除】OpenList API 删除失败：%s", err, exc_info=True)
             return False
 
     def _save_history(
