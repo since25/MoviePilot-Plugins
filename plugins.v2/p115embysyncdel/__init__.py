@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote, urlparse
 
 from app import schemas
+from fastapi import Request
 from app.core.event import Event, eventmanager
 from app.chain.storage import StorageChain
 from app.core.config import settings
@@ -20,7 +21,7 @@ class P115EmbySyncDel(_PluginBase):
     plugin_name = "115 Emby 联动删除"
     plugin_desc = "通过神医助手删除 Emby 媒体时，同步删除 115 文件与 MoviePilot 整理记录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png"
-    plugin_version = "0.1.2"
+    plugin_version = "0.1.3"
     plugin_author = "Codex"
     author_url = "https://openai.com"
     plugin_config_prefix = "p115embysyncdel_"
@@ -414,7 +415,7 @@ class P115EmbySyncDel(_PluginBase):
         self,
         apikey: str = "",
         payload: Optional[str] = None,
-        request: Any = None,
+        request: Request = None,
     ):
         """
         接收 Emby Webhooks 请求。
@@ -433,6 +434,7 @@ class P115EmbySyncDel(_PluginBase):
             logger.warning("【115 Emby 联动删除】Webhook 未获取到有效请求体")
             return schemas.Response(success=False, message="未获取到Webhook数据")
 
+        logger.info("【115 Emby 联动删除】Webhook 原始数据：%s", event_data)
         event_name = self._event_value(event_data, "event")
         logger.info("【115 Emby 联动删除】收到 Webhook 事件：%s", event_name or "unknown")
         if event_name != "deep.delete":
@@ -733,12 +735,18 @@ class P115EmbySyncDel(_PluginBase):
         :return: 原始字段值。
         """
         if isinstance(event_data, dict):
-            return event_data.get(key)
+            if key in event_data:
+                return event_data.get(key)
+            lower_key = key.lower()
+            for candidate_key, candidate_value in event_data.items():
+                if str(candidate_key).lower() == lower_key:
+                    return candidate_value
+            return None
         return getattr(event_data, key, None)
 
     async def _extract_webhook_payload(
         self,
-        request: Any = None,
+        request: Request = None,
         payload: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """
@@ -774,7 +782,18 @@ class P115EmbySyncDel(_PluginBase):
 
             return normalized or None
         except Exception:
-            return None
+            pass
+
+        try:
+            raw_body = await request.body()
+            if raw_body:
+                candidate = self._loads_json(raw_body.decode("utf-8", errors="ignore").strip())
+                if isinstance(candidate, dict):
+                    return candidate
+        except Exception:
+            pass
+
+        return None
 
     @staticmethod
     def _loads_json(value: Any) -> Optional[Any]:
@@ -811,7 +830,12 @@ class P115EmbySyncDel(_PluginBase):
         :return: 媒体服务器名称。
         """
         for key in ("media_server", "mediaserver", "server", "server_name"):
-            value = cls._event_value(event_data, key).strip()
+            value = cls._event_raw_value(event_data, key)
+            if isinstance(value, dict):
+                server_name = cls._event_value(value, "name").strip()
+                if server_name:
+                    return server_name
+            value = str(value or "").strip()
             if value:
                 return value
         return ""
