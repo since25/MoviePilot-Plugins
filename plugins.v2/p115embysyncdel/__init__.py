@@ -1,10 +1,13 @@
 import time
+import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote, urlparse
 
+from app import schemas
 from app.core.event import Event, eventmanager
 from app.chain.storage import StorageChain
+from app.core.config import settings
 from app.db.models.transferhistory import TransferHistory
 from app.db.transferhistory_oper import TransferHistoryOper
 from app.helper.mediaserver import MediaServerHelper
@@ -391,6 +394,75 @@ class P115EmbySyncDel(_PluginBase):
         """
         return []
 
+    def get_api(self) -> List[Dict[str, Any]]:
+        """
+        对外暴露 Webhook 接口，供 Emby Webhooks 调用。
+
+        :return: API 列表。
+        """
+        return [
+            {
+                "path": "/webhook",
+                "endpoint": self.webhook,
+                "methods": ["POST"],
+                "summary": "接收 Emby 神医助手深度删除通知",
+                "description": "接收 deep.delete 事件并联动删除 115 文件。",
+            }
+        ]
+
+    async def webhook(
+        self,
+        apikey: str = "",
+        payload: Optional[str] = None,
+        request: Any = None,
+    ):
+        """
+        接收 Emby Webhooks 请求。
+
+        :param apikey: API 密钥。
+        :param payload: 可选的原始 JSON 字符串。
+        :param request: 框架注入的请求对象。
+        :return: API 响应。
+        """
+        if apikey != settings.API_TOKEN:
+            return schemas.Response(success=False, message="API密钥错误")
+
+        event_data = await self._extract_webhook_payload(request=request, payload=payload)
+        if not event_data:
+            return schemas.Response(success=False, message="未获取到Webhook数据")
+
+        event_name = self._event_value(event_data, "event")
+        if event_name != "deep.delete":
+            return schemas.Response(success=True, message=f"忽略事件：{event_name or 'unknown'}")
+
+        if not self._enabled:
+            return schemas.Response(success=True, message="插件未启用，事件已忽略")
+
+        media_server = self._extract_media_server(event_data)
+        if self._mediaservers and media_server not in self._mediaservers:
+            return schemas.Response(success=True, message=f"媒体服务器不匹配：{media_server or '未知'}")
+
+        media_type = self._event_value(event_data, "item_type")
+        if media_type not in {"Movie", "MOV"}:
+            return schemas.Response(success=True, message=f"当前仅处理电影，已忽略：{media_type or 'unknown'}")
+
+        media_name = self._event_value(event_data, "item_name")
+        emby_path = self._event_value(event_data, "item_path").replace("\\", "/")
+        tmdb_id = self._safe_int(self._event_raw_value(event_data, "tmdb_id"))
+
+        if not emby_path:
+            return schemas.Response(success=False, message="缺少 item_path，无法处理")
+
+        if self._emby_library_path and not self._has_prefix(emby_path, self._emby_library_path):
+            return schemas.Response(success=True, message="路径不在目标媒体库内，已忽略")
+
+        self._handle_movie_delete(
+            media_name=media_name,
+            emby_path=emby_path,
+            tmdb_id=tmdb_id,
+        )
+        return schemas.Response(success=True, message="deep.delete 事件处理完成")
+
     def _handle_movie_delete(
         self,
         media_name: str,
@@ -619,6 +691,20 @@ class P115EmbySyncDel(_PluginBase):
         )
         self.save_data("history", history[-50:])
 
+    def get_state(self) -> bool:
+        """
+        返回插件启用状态，供前端展示与控制。
+
+        :return: 是否已启用。
+        """
+        return self._enabled
+
+    def stop_service(self) -> None:
+        """
+        停止插件服务。
+        """
+        pass
+
     @staticmethod
     def _safe_int(value: Any) -> Optional[int]:
         """
@@ -646,6 +732,61 @@ class P115EmbySyncDel(_PluginBase):
         if isinstance(event_data, dict):
             return event_data.get(key)
         return getattr(event_data, key, None)
+
+    async def _extract_webhook_payload(
+        self,
+        request: Any = None,
+        payload: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        从请求中提取 Webhook 数据，兼容 json 与 form-data。
+
+        :param request: 请求对象。
+        :param payload: 原始 JSON 字符串。
+        :return: 事件数据字典。
+        """
+        candidate = self._loads_json(payload)
+        if isinstance(candidate, dict):
+            return candidate
+
+        if not request:
+            return None
+
+        try:
+            candidate = await request.json()
+            if isinstance(candidate, dict):
+                return candidate
+        except Exception:
+            pass
+
+        try:
+            form_data = await request.form()
+            normalized = {key: value for key, value in form_data.items()}
+
+            # Emby Webhooks 常把 JSON 包在 payload/data/Message 这类字段中
+            for key in ("payload", "data", "message", "Message", "json"):
+                nested = self._loads_json(normalized.get(key))
+                if isinstance(nested, dict):
+                    return nested
+
+            return normalized or None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _loads_json(value: Any) -> Optional[Any]:
+        """
+        尝试解析 JSON 字符串。
+
+        :param value: 输入值。
+        :return: 解析结果。
+        """
+        if not value or not isinstance(value, str):
+            return None
+        try:
+            return json.loads(value)
+        except Exception:
+            return None
 
     @classmethod
     def _event_value(cls, event_data: Any, key: str) -> str:
