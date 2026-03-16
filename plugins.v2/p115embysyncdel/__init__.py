@@ -20,7 +20,7 @@ class P115EmbySyncDel(_PluginBase):
     plugin_name = "115 Emby 联动删除"
     plugin_desc = "通过神医助手删除 Emby 媒体时，同步删除 115 文件与 MoviePilot 整理记录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png"
-    plugin_version = "0.1.0"
+    plugin_version = "0.1.1"
     plugin_author = "Codex"
     author_url = "https://openai.com"
     plugin_config_prefix = "p115embysyncdel_"
@@ -425,13 +425,16 @@ class P115EmbySyncDel(_PluginBase):
         :return: API 响应。
         """
         if apikey != settings.API_TOKEN:
+            logger.warning("【115 Emby 联动删除】Webhook 请求 API 密钥错误")
             return schemas.Response(success=False, message="API密钥错误")
 
         event_data = await self._extract_webhook_payload(request=request, payload=payload)
         if not event_data:
+            logger.warning("【115 Emby 联动删除】Webhook 未获取到有效请求体")
             return schemas.Response(success=False, message="未获取到Webhook数据")
 
         event_name = self._event_value(event_data, "event")
+        logger.info("【115 Emby 联动删除】收到 Webhook 事件：%s", event_name or "unknown")
         if event_name != "deep.delete":
             return schemas.Response(success=True, message=f"忽略事件：{event_name or 'unknown'}")
 
