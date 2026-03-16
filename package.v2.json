@@ -259,11 +259,12 @@
     "name": "115 Emby 联动删除",
     "description": "通过神医助手删除 Emby 媒体时，同步删除 115 文件与 MoviePilot 整理记录。",
     "labels": "媒体库,网盘",
-    "version": "0.1.5",
+    "version": "0.1.6",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png",
     "author": "Codex",
     "level": 1,
     "history": {
+      "v0.1.6": "补充转移记录查询与 STRM/115 删除链路日志",
       "v0.1.5": "补充删除流程前置判断日志，便于定位卡点",
       "v0.1.4": "适配 Emby 实际发送的 library.deleted 事件结构",
       "v0.1.3": "兼容 Emby Webhook 请求体与大小写字段，并输出原始事件日志",

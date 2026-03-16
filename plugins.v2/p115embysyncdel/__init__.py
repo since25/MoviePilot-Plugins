@@ -21,7 +21,7 @@ class P115EmbySyncDel(_PluginBase):
     plugin_name = "115 Emby 联动删除"
     plugin_desc = "通过神医助手删除 Emby 媒体时，同步删除 115 文件与 MoviePilot 整理记录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png"
-    plugin_version = "0.1.5"
+    plugin_version = "0.1.6"
     plugin_author = "Codex"
     author_url = "https://openai.com"
     plugin_config_prefix = "p115embysyncdel_"
@@ -501,7 +501,18 @@ class P115EmbySyncDel(_PluginBase):
         :param emby_path: Emby 上报的整理后 STRM 路径。
         :param tmdb_id: TMDB ID。
         """
-        transfer_history = self._get_transfer_record(emby_path=emby_path, tmdb_id=tmdb_id)
+        logger.info(
+            "【115 Emby 联动删除】查询转移记录：title=%s, dest=%s, tmdb=%s",
+            media_name or "unknown",
+            emby_path,
+            tmdb_id or "unknown",
+        )
+        try:
+            transfer_history = self._get_transfer_record(emby_path=emby_path, tmdb_id=tmdb_id)
+        except Exception as err:
+            logger.error("【115 Emby 联动删除】查询转移记录异常：%s", err, exc_info=True)
+            return
+
         if not transfer_history:
             logger.warning(
                 "【115 Emby 联动删除】未找到转移记录，请确认 MP 历史与整理路径一致：%s",
@@ -516,6 +527,12 @@ class P115EmbySyncDel(_PluginBase):
             return
 
         src_path = str(getattr(transfer_history, "src", "") or "").replace("\\", "/")
+        logger.info(
+            "【115 Emby 联动删除】命中转移记录：id=%s, src=%s, dest=%s",
+            getattr(transfer_history, "id", "unknown"),
+            src_path or "unknown",
+            str(getattr(transfer_history, "dest", "") or "").replace("\\", "/") or "unknown",
+        )
         if not src_path:
             logger.warning("【115 Emby 联动删除】转移记录缺少源路径，跳过：%s", emby_path)
             self._save_history(
@@ -526,6 +543,7 @@ class P115EmbySyncDel(_PluginBase):
             )
             return
 
+        logger.info("【115 Emby 联动删除】开始读取原始 STRM：%s", src_path)
         openlist_url = self._read_strm_target(src_path)
         if not openlist_url:
             self._save_history(
@@ -536,6 +554,7 @@ class P115EmbySyncDel(_PluginBase):
             )
             return
 
+        logger.info("【115 Emby 联动删除】STRM 目标 URL：%s", openlist_url)
         p115_path = self._convert_openlist_url_to_pan_path(openlist_url)
         if not p115_path:
             self._save_history(
@@ -546,8 +565,10 @@ class P115EmbySyncDel(_PluginBase):
             )
             return
 
+        logger.info("【115 Emby 联动删除】还原 115 路径：%s", p115_path)
         result_parts: List[str] = []
         if self._delete_p115_file:
+            logger.info("【115 Emby 联动删除】开始删除 115 文件：%s", p115_path)
             if self._delete_p115_file_item(media_name=media_name, p115_path=p115_path):
                 result_parts.append("115 文件已删除")
             else:
