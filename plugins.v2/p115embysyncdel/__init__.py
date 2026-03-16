@@ -21,7 +21,7 @@ class P115EmbySyncDel(_PluginBase):
     plugin_name = "115 Emby 联动删除"
     plugin_desc = "通过神医助手删除 Emby 媒体时，同步删除 115 文件与 MoviePilot 整理记录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png"
-    plugin_version = "0.1.3"
+    plugin_version = "0.1.4"
     plugin_author = "Codex"
     author_url = "https://openai.com"
     plugin_config_prefix = "p115embysyncdel_"
@@ -437,7 +437,7 @@ class P115EmbySyncDel(_PluginBase):
         logger.info("【115 Emby 联动删除】Webhook 原始数据：%s", event_data)
         event_name = self._event_value(event_data, "event")
         logger.info("【115 Emby 联动删除】收到 Webhook 事件：%s", event_name or "unknown")
-        if event_name != "deep.delete":
+        if event_name not in {"deep.delete", "library.deleted"}:
             return schemas.Response(success=True, message=f"忽略事件：{event_name or 'unknown'}")
 
         if not self._enabled:
@@ -447,13 +447,13 @@ class P115EmbySyncDel(_PluginBase):
         if self._mediaservers and media_server not in self._mediaservers:
             return schemas.Response(success=True, message=f"媒体服务器不匹配：{media_server or '未知'}")
 
-        media_type = self._event_value(event_data, "item_type")
+        media_type = self._extract_media_type(event_data)
         if media_type not in {"Movie", "MOV"}:
             return schemas.Response(success=True, message=f"当前仅处理电影，已忽略：{media_type or 'unknown'}")
 
-        media_name = self._event_value(event_data, "item_name")
-        emby_path = self._event_value(event_data, "item_path").replace("\\", "/")
-        tmdb_id = self._safe_int(self._event_raw_value(event_data, "tmdb_id"))
+        media_name = self._extract_media_name(event_data)
+        emby_path = self._extract_media_path(event_data).replace("\\", "/")
+        tmdb_id = self._extract_tmdb_id(event_data)
 
         if not emby_path:
             return schemas.Response(success=False, message="缺少 item_path，无法处理")
@@ -466,7 +466,7 @@ class P115EmbySyncDel(_PluginBase):
             emby_path=emby_path,
             tmdb_id=tmdb_id,
         )
-        return schemas.Response(success=True, message="deep.delete 事件处理完成")
+        return schemas.Response(success=True, message=f"{event_name} 事件处理完成")
 
     def _handle_movie_delete(
         self,
@@ -839,6 +839,44 @@ class P115EmbySyncDel(_PluginBase):
             if value:
                 return value
         return ""
+
+    @classmethod
+    def _extract_media_type(cls, event_data: Any) -> str:
+        item = cls._event_raw_value(event_data, "item")
+        if isinstance(item, dict):
+            value = cls._event_value(item, "type").strip()
+            if value:
+                return value
+        return cls._event_value(event_data, "item_type").strip()
+
+    @classmethod
+    def _extract_media_name(cls, event_data: Any) -> str:
+        item = cls._event_raw_value(event_data, "item")
+        if isinstance(item, dict):
+            value = cls._event_value(item, "name").strip()
+            if value:
+                return value
+        return cls._event_value(event_data, "item_name").strip()
+
+    @classmethod
+    def _extract_media_path(cls, event_data: Any) -> str:
+        item = cls._event_raw_value(event_data, "item")
+        if isinstance(item, dict):
+            value = cls._event_value(item, "path").strip()
+            if value:
+                return value
+        return cls._event_value(event_data, "item_path").strip()
+
+    @classmethod
+    def _extract_tmdb_id(cls, event_data: Any) -> Optional[int]:
+        item = cls._event_raw_value(event_data, "item")
+        if isinstance(item, dict):
+            provider_ids = cls._event_raw_value(item, "providerids")
+            if isinstance(provider_ids, dict):
+                tmdb_id = cls._safe_int(cls._event_raw_value(provider_ids, "tmdb"))
+                if tmdb_id:
+                    return tmdb_id
+        return cls._safe_int(cls._event_raw_value(event_data, "tmdb_id"))
 
     @staticmethod
     def _has_prefix(full_path: str, prefix_path: str) -> bool:
