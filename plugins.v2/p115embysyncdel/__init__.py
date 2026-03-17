@@ -22,7 +22,7 @@ class P115EmbySyncDel(_PluginBase):
     plugin_name = "115 Emby 联动删除"
     plugin_desc = "通过神医助手删除 Emby 媒体时，同步删除 115 文件与 MoviePilot 整理记录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png"
-    plugin_version = "0.1.10"
+    plugin_version = "0.1.11"
     plugin_author = "Codex"
     author_url = "https://openai.com"
     plugin_config_prefix = "p115embysyncdel_"
@@ -514,10 +514,6 @@ class P115EmbySyncDel(_PluginBase):
             return schemas.Response(success=False, message="缺少 item_path，无法处理")
 
         media_type = self._extract_media_type(event_data)
-        if media_type not in {"Movie", "MOV"}:
-            logger.info("【115 Emby 联动删除】当前仅处理电影，跳过类型：%s", media_type or "unknown")
-            return schemas.Response(success=True, message=f"当前仅处理电影，已忽略：{media_type or 'unknown'}")
-
         tmdb_id = self._extract_tmdb_id(event_data)
 
         if self._emby_library_path and not self._has_prefix(emby_path, self._emby_library_path):
@@ -535,11 +531,30 @@ class P115EmbySyncDel(_PluginBase):
             tmdb_id or "unknown",
             media_server or "unknown",
         )
-        self._handle_movie_delete(
-            media_name=media_name,
-            emby_path=emby_path,
-            tmdb_id=tmdb_id,
-        )
+        if media_type in {"Movie", "MOV"}:
+            self._handle_movie_delete(
+                media_name=media_name,
+                emby_path=emby_path,
+                tmdb_id=tmdb_id,
+            )
+        elif media_type == "Episode":
+            season_num = self._extract_season_num(event_data)
+            episode_num = self._extract_episode_num(event_data)
+            logger.info(
+                "【115 Emby 联动删除】识别到电视剧单集删除：season=%s, episode=%s",
+                season_num or "unknown",
+                episode_num or "unknown",
+            )
+            self._handle_tv_delete(
+                media_name=media_name,
+                emby_path=emby_path,
+                tmdb_id=tmdb_id,
+                season_num=season_num,
+                episode_num=episode_num,
+            )
+        else:
+            logger.info("【115 Emby 联动删除】当前仅处理电影和单集，跳过类型：%s", media_type or "unknown")
+            return schemas.Response(success=True, message=f"当前仅处理电影和单集，已忽略：{media_type or 'unknown'}")
         return schemas.Response(success=True, message=f"{event_name} 事件处理完成")
 
     def _handle_movie_delete(
@@ -675,6 +690,142 @@ class P115EmbySyncDel(_PluginBase):
             result=result_text,
         )
 
+    def _handle_tv_delete(
+        self,
+        media_name: str,
+        emby_path: str,
+        tmdb_id: Optional[int],
+        season_num: Optional[int],
+        episode_num: Optional[int],
+    ) -> None:
+        """
+        处理电视剧单集删除主流程，仅删除单集文件。
+
+        :param media_name: 媒体名称。
+        :param emby_path: Emby 上报的整理后 STRM 路径。
+        :param tmdb_id: TMDB ID。
+        :param season_num: 季号。
+        :param episode_num: 集号。
+        """
+        logger.info(
+            "【115 Emby 联动删除】查询电视剧转移记录：title=%s, dest=%s, tmdb=%s, season=%s, episode=%s",
+            media_name or "unknown",
+            emby_path,
+            tmdb_id or "unknown",
+            season_num or "unknown",
+            episode_num or "unknown",
+        )
+        try:
+            transfer_history = self._get_tv_transfer_record(
+                emby_path=emby_path,
+                tmdb_id=tmdb_id,
+                season_num=season_num,
+                episode_num=episode_num,
+            )
+        except Exception as err:
+            logger.error("【115 Emby 联动删除】查询电视剧转移记录异常：%s", err, exc_info=True)
+            return
+
+        if not transfer_history:
+            logger.warning(
+                "【115 Emby 联动删除】未找到电视剧转移记录，请确认 MP 历史与整理路径一致：%s",
+                emby_path,
+            )
+            self._save_history(
+                media_name=media_name or Path(emby_path).stem,
+                emby_path=emby_path,
+                p115_path="",
+                result="未找到电视剧转移记录",
+            )
+            return
+
+        src_path = str(getattr(transfer_history, "src", "") or "").replace("\\", "/")
+        logger.info(
+            "【115 Emby 联动删除】命中电视剧转移记录：id=%s, src=%s, dest=%s",
+            getattr(transfer_history, "id", "unknown"),
+            src_path or "unknown",
+            str(getattr(transfer_history, "dest", "") or "").replace("\\", "/") or "unknown",
+        )
+        if not src_path:
+            logger.warning("【115 Emby 联动删除】电视剧转移记录缺少源路径，跳过：%s", emby_path)
+            self._save_history(
+                media_name=media_name or transfer_history.title or Path(emby_path).stem,
+                emby_path=emby_path,
+                p115_path="",
+                result="电视剧转移记录缺少源路径",
+            )
+            return
+
+        logger.info("【115 Emby 联动删除】开始读取电视剧原始 STRM：%s", src_path)
+        openlist_url = self._read_strm_target(src_path)
+        if not openlist_url:
+            self._save_history(
+                media_name=media_name or transfer_history.title or Path(emby_path).stem,
+                emby_path=emby_path,
+                p115_path="",
+                result="电视剧原始 STRM 文件不可读或内容为空",
+            )
+            return
+
+        logger.info("【115 Emby 联动删除】电视剧 STRM 目标 URL：%s", openlist_url)
+        p115_path = self._convert_openlist_url_to_pan_path(openlist_url)
+        if not p115_path:
+            self._save_history(
+                media_name=media_name or transfer_history.title or Path(emby_path).stem,
+                emby_path=emby_path,
+                p115_path="",
+                result="无法从电视剧 STRM 内容还原 115 路径",
+            )
+            return
+
+        logger.info("【115 Emby 联动删除】还原电视剧 115 路径：%s", p115_path)
+        openlist_api_path = self._convert_openlist_url_to_api_path(openlist_url)
+        if openlist_api_path:
+            logger.info("【115 Emby 联动删除】还原电视剧 OpenList API 路径：%s", openlist_api_path)
+
+        result_parts: List[str] = []
+        delete_success = False
+        if self._delete_p115_file:
+            logger.info("【115 Emby 联动删除】开始删除电视剧单集文件：%s", openlist_api_path or p115_path)
+            if self._delete_p115_file_item(
+                media_name=media_name,
+                p115_path=p115_path,
+                openlist_api_path=openlist_api_path,
+                openlist_is_dir=False,
+            ):
+                delete_success = True
+                result_parts.append("115 单集文件已删除")
+            else:
+                result_parts.append("115 单集文件删除失败")
+
+        if self._delete_transfer_history and (
+            not self._delete_p115_file or delete_success
+        ):
+            self._transferhis.delete(transfer_history.id)
+            result_parts.append("整理记录已删除")
+        elif self._delete_transfer_history:
+            result_parts.append("整理记录未删除")
+
+        result_text = "，".join(result_parts) if result_parts else "未执行删除动作"
+        logger.info("【115 Emby 联动删除】%s -> %s，结果：%s", emby_path, p115_path, result_text)
+
+        if self._notify:
+            self.post_message(
+                mtype=NotificationType.Plugin,
+                title="115 Emby 联动删除完成",
+                text=f"{media_name or transfer_history.title or Path(emby_path).stem}\n"
+                f"Emby 路径：{emby_path}\n"
+                f"115 路径：{p115_path}\n"
+                f"结果：{result_text}",
+            )
+
+        self._save_history(
+            media_name=media_name or transfer_history.title or Path(emby_path).stem,
+            emby_path=emby_path,
+            p115_path=p115_path,
+            result=result_text,
+        )
+
     def _resolve_movie_delete_target(
         self,
         media_name: str,
@@ -772,6 +923,35 @@ class P115EmbySyncDel(_PluginBase):
             histories: List[TransferHistory] = self._transferhis.get_by(
                 tmdbid=tmdb_id,
                 mtype=MediaType.MOVIE.value,
+                dest=emby_path,
+            )
+            if histories:
+                return histories[0]
+
+        return self._transferhis.get_by_dest(emby_path)
+
+    def _get_tv_transfer_record(
+        self,
+        emby_path: str,
+        tmdb_id: Optional[int],
+        season_num: Optional[int],
+        episode_num: Optional[int],
+    ) -> Optional[TransferHistory]:
+        """
+        查询电视剧单集转移记录。
+
+        :param emby_path: Emby 上报的整理后路径。
+        :param tmdb_id: TMDB ID。
+        :param season_num: 季号。
+        :param episode_num: 集号。
+        :return: 转移记录。
+        """
+        if tmdb_id and season_num and episode_num:
+            histories: List[TransferHistory] = self._transferhis.get_by(
+                tmdbid=tmdb_id,
+                mtype=MediaType.TV.value,
+                season=f"S{season_num:02d}",
+                episode=f"E{episode_num:02d}",
                 dest=emby_path,
             )
             if histories:
@@ -1150,6 +1330,36 @@ class P115EmbySyncDel(_PluginBase):
                 if tmdb_id:
                     return tmdb_id
         return cls._safe_int(cls._event_raw_value(event_data, "tmdb_id"))
+
+    @classmethod
+    def _extract_season_num(cls, event_data: Any) -> Optional[int]:
+        """
+        提取季号。
+
+        :param event_data: 事件数据。
+        :return: 季号。
+        """
+        item = cls._event_raw_value(event_data, "item")
+        if isinstance(item, dict):
+            season_num = cls._safe_int(cls._event_raw_value(item, "parentindexnumber"))
+            if season_num is not None:
+                return season_num
+        return cls._safe_int(cls._event_raw_value(event_data, "season_id"))
+
+    @classmethod
+    def _extract_episode_num(cls, event_data: Any) -> Optional[int]:
+        """
+        提取集号。
+
+        :param event_data: 事件数据。
+        :return: 集号。
+        """
+        item = cls._event_raw_value(event_data, "item")
+        if isinstance(item, dict):
+            episode_num = cls._safe_int(cls._event_raw_value(item, "indexnumber"))
+            if episode_num is not None:
+                return episode_num
+        return cls._safe_int(cls._event_raw_value(event_data, "episode_id"))
 
     @staticmethod
     def _has_prefix(full_path: str, prefix_path: str) -> bool:
