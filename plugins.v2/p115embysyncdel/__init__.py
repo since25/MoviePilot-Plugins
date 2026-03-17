@@ -23,7 +23,7 @@ class P115EmbySyncDel(_PluginBase):
     plugin_name = "115 Emby 联动删除"
     plugin_desc = "通过神医助手删除 Emby 媒体时，同步删除 115 文件与 MoviePilot 整理记录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png"
-    plugin_version = "0.1.13"
+    plugin_version = "0.1.14"
     plugin_author = "Codex"
     author_url = "https://openai.com"
     plugin_config_prefix = "p115embysyncdel_"
@@ -560,6 +560,18 @@ class P115EmbySyncDel(_PluginBase):
                 emby_path=emby_path,
                 tmdb_id=tmdb_id,
             )
+        elif media_type == "Series" and event_name == "deep.delete":
+            mount_paths = self._extract_mount_paths(event_data)
+            logger.info(
+                "【115 Emby 联动删除】识别到电视剧整剧深度删除：mount_paths=%s",
+                len(mount_paths),
+            )
+            self._handle_tv_series_delete(
+                media_name=media_name,
+                emby_path=emby_path,
+                tmdb_id=tmdb_id,
+                mount_paths=mount_paths,
+            )
         elif media_type == "Episode":
             season_num = self._extract_season_num(event_data)
             episode_num = self._extract_episode_num(event_data)
@@ -588,8 +600,8 @@ class P115EmbySyncDel(_PluginBase):
                 season_num=season_num,
             )
         else:
-            logger.info("【115 Emby 联动删除】当前仅处理电影、电视剧单集和整季，跳过类型：%s", media_type or "unknown")
-            return schemas.Response(success=True, message=f"当前仅处理电影、电视剧单集和整季，已忽略：{media_type or 'unknown'}")
+            logger.info("【115 Emby 联动删除】当前仅处理电影、电视剧单集、整季和深度删除整剧，跳过类型：%s", media_type or "unknown")
+            return schemas.Response(success=True, message=f"当前仅处理电影、电视剧单集、整季和深度删除整剧，已忽略：{media_type or 'unknown'}")
         return schemas.Response(success=True, message=f"{event_name} 事件处理完成")
 
     def _handle_movie_delete(
@@ -1009,6 +1021,125 @@ class P115EmbySyncDel(_PluginBase):
             result=result_text,
         )
 
+    def _handle_tv_series_delete(
+        self,
+        media_name: str,
+        emby_path: str,
+        tmdb_id: Optional[int],
+        mount_paths: List[str],
+    ) -> None:
+        """
+        处理电视剧整剧深度删除。优先使用神医助手提供的 Mount Paths 推导 OpenList 删除目录。
+
+        :param media_name: 剧名。
+        :param emby_path: Emby 剧集目录路径。
+        :param tmdb_id: TMDB ID。
+        :param mount_paths: 深度删除通知中的挂载路径列表。
+        """
+        if not self._delete_tv_season_dir:
+            logger.info("【115 Emby 联动删除】电视剧整剧联动删除未启用，跳过：%s", emby_path)
+            self._save_history(
+                media_name=media_name or Path(emby_path).name,
+                emby_path=emby_path,
+                p115_path="",
+                result="电视剧整剧联动删除未启用",
+            )
+            return
+
+        logger.info(
+            "【115 Emby 联动删除】开始处理电视剧整剧深度删除：title=%s, series_path=%s, tmdb=%s, mount_paths=%s",
+            media_name or "unknown",
+            emby_path,
+            tmdb_id or "unknown",
+            len(mount_paths),
+        )
+        if not mount_paths:
+            logger.warning("【115 Emby 联动删除】深度删除通知缺少 Mount Paths，无法处理整剧：%s", media_name or emby_path)
+            self._save_history(
+                media_name=media_name or Path(emby_path).name,
+                emby_path=emby_path,
+                p115_path="",
+                result="深度删除通知缺少 Mount Paths",
+            )
+            return
+
+        openlist_api_paths = [
+            api_path
+            for api_path in (self._convert_openlist_url_to_api_path(path) for path in mount_paths)
+            if api_path
+        ]
+        p115_paths = [
+            pan_path
+            for pan_path in (self._convert_openlist_url_to_pan_path(path) for path in mount_paths)
+            if pan_path
+        ]
+        if not openlist_api_paths or not p115_paths:
+            logger.warning("【115 Emby 联动删除】深度删除 Mount Paths 无法还原删除路径：%s", mount_paths)
+            self._save_history(
+                media_name=media_name or Path(emby_path).name,
+                emby_path=emby_path,
+                p115_path="",
+                result="深度删除 Mount Paths 无法还原删除路径",
+            )
+            return
+
+        logger.info("【115 Emby 联动删除】深度删除还原 OpenList 路径：%s", openlist_api_paths)
+        delete_target = self._resolve_tv_series_delete_target(
+            media_name=media_name,
+            openlist_api_paths=openlist_api_paths,
+        )
+        if not delete_target:
+            logger.warning("【115 Emby 联动删除】未能从 Mount Paths 收敛出整剧目录，跳过：%s", openlist_api_paths)
+            self._save_history(
+                media_name=media_name or Path(emby_path).name,
+                emby_path=emby_path,
+                p115_path="",
+                result="未能从 Mount Paths 收敛出整剧目录",
+            )
+            return
+
+        histories = self._get_tv_series_transfer_records(emby_path=emby_path, tmdb_id=tmdb_id)
+        logger.info("【115 Emby 联动删除】命中电视剧整剧转移记录：%s 条", len(histories))
+
+        result_parts: List[str] = []
+        delete_success = False
+        if self._delete_p115_file:
+            logger.info("【115 Emby 联动删除】开始删除电视剧整剧目录：%s", delete_target)
+            delete_success = self._delete_p115_file_item(
+                media_name=media_name or Path(emby_path).name,
+                p115_path=str(Path(p115_paths[0]).parent).replace("\\", "/"),
+                openlist_api_path=delete_target,
+                openlist_is_dir=True,
+            )
+            result_parts.append("115 整剧目录已删除" if delete_success else "115 整剧目录删除失败")
+
+        if self._delete_transfer_history and (not self._delete_p115_file or delete_success):
+            for transfer_history in histories:
+                self._transferhis.delete(transfer_history.id)
+            result_parts.append(f"整理记录已删除({len(histories)}条)")
+        elif self._delete_transfer_history:
+            result_parts.append("整理记录未删除")
+
+        result_text = "，".join(result_parts) if result_parts else "未执行删除动作"
+        logger.info("【115 Emby 联动删除】%s -> %s，结果：%s", emby_path, delete_target, result_text)
+
+        if self._notify:
+            self.post_message(
+                mtype=NotificationType.Plugin,
+                title="115 Emby 联动删除完成",
+                text=f"{media_name or Path(emby_path).name}\n"
+                f"Emby 路径：{emby_path}\n"
+                f"OpenList 目录：{delete_target}\n"
+                f"结果：{result_text}",
+            )
+
+        self._save_history(
+            media_name=media_name or Path(emby_path).name,
+            emby_path=emby_path,
+            p115_path=str(Path(p115_paths[0]).parent).replace("\\", "/"),
+            result=result_text,
+        )
+
     def _resolve_movie_delete_target(
         self,
         media_name: str,
@@ -1182,6 +1313,35 @@ class P115EmbySyncDel(_PluginBase):
             )
         ]
 
+    def _get_tv_series_transfer_records(
+        self,
+        emby_path: str,
+        tmdb_id: Optional[int],
+    ) -> List[TransferHistory]:
+        """
+        查询电视剧整剧转移记录，优先按 tmdb 命中，再按剧目录路径过滤。
+
+        :param emby_path: Emby 上报的剧集目录路径。
+        :param tmdb_id: TMDB ID。
+        :return: 转移记录列表。
+        """
+        histories: List[TransferHistory] = []
+        if tmdb_id:
+            histories = self._transferhis.get_by(
+                tmdbid=tmdb_id,
+                mtype=MediaType.TV.value,
+            ) or []
+
+        series_path = emby_path.rstrip("/").replace("\\", "/")
+        return [
+            history
+            for history in histories
+            if self._has_prefix(
+                str(getattr(history, "dest", "") or "").replace("\\", "/"),
+                series_path,
+            )
+        ]
+
     @staticmethod
     def _resolve_tv_season_delete_target(openlist_api_paths: List[str]) -> Optional[str]:
         """
@@ -1198,6 +1358,61 @@ class P115EmbySyncDel(_PluginBase):
         if len(parent_dirs) == 1:
             return next(iter(parent_dirs))
         return None
+
+    @classmethod
+    def _resolve_tv_series_delete_target(
+        cls,
+        media_name: str,
+        openlist_api_paths: List[str],
+    ) -> Optional[str]:
+        """
+        从神医助手深度删除提供的 Mount Paths 中推导整剧删除目录。
+
+        :param media_name: 剧名。
+        :param openlist_api_paths: 单集 OpenList API 路径列表。
+        :return: 整剧目录路径。
+        """
+        parent_dirs = [
+            str(Path(path).parent).replace("\\", "/")
+            for path in openlist_api_paths
+            if path
+        ]
+        if not parent_dirs:
+            return None
+        if len(set(parent_dirs)) == 1:
+            return parent_dirs[0]
+
+        common_parent = cls._get_common_parent_dir(parent_dirs)
+        if not common_parent:
+            return None
+
+        common_name = cls._normalize_movie_keyword(Path(common_parent).name)
+        media_key = cls._normalize_movie_keyword(media_name)
+        if media_key and common_name and media_key in common_name:
+            return common_parent
+
+        return None
+
+    @staticmethod
+    def _get_common_parent_dir(paths: List[str]) -> Optional[str]:
+        """
+        计算多个路径的最长公共目录前缀。
+
+        :param paths: 路径列表。
+        :return: 公共父目录。
+        """
+        if not paths:
+            return None
+        split_paths = [Path(path).parts for path in paths]
+        common_parts: List[str] = []
+        for parts in zip(*split_paths):
+            if len(set(parts)) != 1:
+                break
+            common_parts.append(parts[0])
+        if not common_parts:
+            return None
+        common_path = str(Path(*common_parts)).replace("\\", "/")
+        return common_path or None
 
     @staticmethod
     def _read_strm_target(src_path: str) -> Optional[str]:
@@ -1561,6 +1776,16 @@ class P115EmbySyncDel(_PluginBase):
         return cls._event_value(event_data, "item_path").strip()
 
     @classmethod
+    def _extract_description(cls, event_data: Any) -> str:
+        """
+        提取 webhook 描述文本。
+
+        :param event_data: 事件数据。
+        :return: 描述文本。
+        """
+        return cls._event_value(event_data, "description").strip()
+
+    @classmethod
     def _extract_tmdb_id(cls, event_data: Any) -> Optional[int]:
         item = cls._event_raw_value(event_data, "item")
         if isinstance(item, dict):
@@ -1600,6 +1825,19 @@ class P115EmbySyncDel(_PluginBase):
             if episode_num is not None:
                 return episode_num
         return cls._safe_int(cls._event_raw_value(event_data, "episode_id"))
+
+    @classmethod
+    def _extract_mount_paths(cls, event_data: Any) -> List[str]:
+        """
+        从神医助手 deep.delete 的 Description 中提取 Mount Paths。
+
+        :param event_data: 事件数据。
+        :return: 挂载路径列表。
+        """
+        description = cls._extract_description(event_data)
+        if not description:
+            return []
+        return re.findall(r"https?://\S+", description)
 
     @classmethod
     def _is_tv_season_delete(cls, event_data: Any, media_type: str, emby_path: str) -> bool:
