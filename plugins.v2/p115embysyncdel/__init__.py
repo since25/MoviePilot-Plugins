@@ -22,7 +22,7 @@ class P115EmbySyncDel(_PluginBase):
     plugin_name = "115 Emby 联动删除"
     plugin_desc = "通过神医助手删除 Emby 媒体时，同步删除 115 文件与 MoviePilot 整理记录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png"
-    plugin_version = "0.1.11"
+    plugin_version = "0.1.12"
     plugin_author = "Codex"
     author_url = "https://openai.com"
     plugin_config_prefix = "p115embysyncdel_"
@@ -244,11 +244,12 @@ class P115EmbySyncDel(_PluginBase):
                                         "props": {"cols": 12},
                                         "content": [
                                             {
-                                                "component": "VTextField",
+                                                "component": "VTextarea",
                                                 "props": {
                                                     "model": "emby_library_path",
+                                                    "rows": 2,
                                                     "label": "Emby 入库 STRM 根路径",
-                                                    "placeholder": "/mnt/user/docker1/alist-strm/video/mp302_mv",
+                                                    "placeholder": "/mnt/user/docker1/alist-strm/video/mp302_mv\\n/mnt/user/docker1/alist-strm/video/mp302_tv",
                                                 },
                                             }
                                         ],
@@ -313,6 +314,10 @@ class P115EmbySyncDel(_PluginBase):
                                     {
                                         "component": "div",
                                         "text": "删除链路：Emby 删除路径 -> MoviePilot 转移记录 -> 原始 STRM 文件 -> OpenList URL -> 115 真实文件。",
+                                    },
+                                    {
+                                        "component": "div",
+                                        "text": "媒体库根路径支持多行配置，可同时填写电影库和剧集库。",
                                     },
                                 ],
                             },
@@ -516,7 +521,7 @@ class P115EmbySyncDel(_PluginBase):
         media_type = self._extract_media_type(event_data)
         tmdb_id = self._extract_tmdb_id(event_data)
 
-        if self._emby_library_path and not self._has_prefix(emby_path, self._emby_library_path):
+        if self._emby_library_path and not self._matches_emby_library_path(emby_path):
             logger.info(
                 "【115 Emby 联动删除】路径不在目标媒体库内，当前=%s，配置前缀=%s",
                 emby_path,
@@ -1373,6 +1378,22 @@ class P115EmbySyncDel(_PluginBase):
         full_parts = Path(full_path).parts
         prefix_parts = Path(prefix_path).parts
         return len(prefix_parts) <= len(full_parts) and full_parts[: len(prefix_parts)] == prefix_parts
+
+    def _matches_emby_library_path(self, emby_path: str) -> bool:
+        """
+        判断媒体路径是否命中任一配置的 Emby 媒体库根路径。
+
+        :param emby_path: Emby 路径。
+        :return: 是否命中。
+        """
+        candidates = [
+            item.strip()
+            for item in self._emby_library_path.replace(",", "\n").splitlines()
+            if item.strip()
+        ]
+        if not candidates:
+            return True
+        return any(self._has_prefix(emby_path, candidate) for candidate in candidates)
 
 
 # 某些 MoviePilot 运行环境会错误地保留抽象方法标记，这里显式清空以确保插件可实例化。

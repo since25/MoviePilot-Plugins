@@ -259,11 +259,12 @@
     "name": "115 Emby 联动删除",
     "description": "通过神医助手删除 Emby 媒体时，同步删除 115 文件与 MoviePilot 整理记录。",
     "labels": "媒体库,网盘",
-    "version": "0.1.11",
+    "version": "0.1.12",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png",
     "author": "Codex",
     "level": 1,
     "history": {
+      "v0.1.12": "支持配置多条 Emby 媒体库根路径，兼容电影库与剧集库并存",
       "v0.1.11": "支持电视剧单集删除策略，按季集信息删除单集文件与整理记录",
       "v0.1.10": "修复电影目录删除成功后未同步删除整理记录的问题",
       "v0.1.9": "根据 Emby 电影目录名与 OpenList 上级目录名关键词匹配决定删目录或删文件",
