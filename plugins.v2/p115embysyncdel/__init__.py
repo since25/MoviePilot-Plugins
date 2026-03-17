@@ -22,7 +22,7 @@ class P115EmbySyncDel(_PluginBase):
     plugin_name = "115 Emby 联动删除"
     plugin_desc = "通过神医助手删除 Emby 媒体时，同步删除 115 文件与 MoviePilot 整理记录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png"
-    plugin_version = "0.1.8"
+    plugin_version = "0.1.9"
     plugin_author = "Codex"
     author_url = "https://openai.com"
     plugin_config_prefix = "p115embysyncdel_"
@@ -44,7 +44,6 @@ class P115EmbySyncDel(_PluginBase):
     _storagechain: Optional[StorageChain] = None
     _transferhis: Optional[TransferHistoryOper] = None
     _mediaserver_helper: Optional[MediaServerHelper] = None
-    _recent_movie_dirs: Dict[str, Dict[str, Any]] = {}
 
     def init_plugin(self, config: Optional[dict] = None) -> None:
         """
@@ -515,9 +514,6 @@ class P115EmbySyncDel(_PluginBase):
             return schemas.Response(success=False, message="缺少 item_path，无法处理")
 
         media_type = self._extract_media_type(event_data)
-        if media_type == "Folder":
-            return self._handle_folder_event(media_name=media_name, emby_path=emby_path)
-
         if media_type not in {"Movie", "MOV"}:
             logger.info("【115 Emby 联动删除】当前仅处理电影，跳过类型：%s", media_type or "unknown")
             return schemas.Response(success=True, message=f"当前仅处理电影，已忽略：{media_type or 'unknown'}")
@@ -545,43 +541,6 @@ class P115EmbySyncDel(_PluginBase):
             tmdb_id=tmdb_id,
         )
         return schemas.Response(success=True, message=f"{event_name} 事件处理完成")
-
-    def _handle_folder_event(self, media_name: str, emby_path: str):
-        """
-        处理 Emby 文件夹删除事件。
-
-        :param media_name: 文件夹名称。
-        :param emby_path: Emby 文件夹路径。
-        :return: API 响应。
-        """
-        if not self._delete_movie_dir:
-            logger.info("【115 Emby 联动删除】电影目录联动删除未启用，忽略目录事件：%s", emby_path)
-            return schemas.Response(success=True, message="电影目录联动删除未启用")
-
-        cached = self._recent_movie_dirs.get(emby_path)
-        if not cached:
-            logger.info("【115 Emby 联动删除】未命中最近电影目录缓存，忽略目录事件：%s", emby_path)
-            return schemas.Response(success=True, message="未命中最近电影目录缓存")
-
-        openlist_dir_path = str(cached.get("openlist_dir_path") or "").strip()
-        if not openlist_dir_path:
-            logger.warning("【115 Emby 联动删除】目录缓存缺少 OpenList 目录路径：%s", emby_path)
-            return schemas.Response(success=False, message="目录缓存缺少 OpenList 目录路径")
-
-        logger.info(
-            "【115 Emby 联动删除】开始处理电影目录删除：name=%s, emby_dir=%s, openlist_dir=%s",
-            media_name or cached.get("media_name") or "unknown",
-            emby_path,
-            openlist_dir_path,
-        )
-        if self._delete_via_openlist_api(
-            media_name=media_name or cached.get("media_name") or "unknown",
-            openlist_api_path=openlist_dir_path,
-            is_dir=True,
-        ):
-            self._recent_movie_dirs.pop(emby_path, None)
-            return schemas.Response(success=True, message="电影目录删除完成")
-        return schemas.Response(success=False, message="电影目录删除失败")
 
     def _handle_movie_delete(
         self,
@@ -664,22 +623,27 @@ class P115EmbySyncDel(_PluginBase):
         openlist_api_path = self._convert_openlist_url_to_api_path(openlist_url)
         if openlist_api_path:
             logger.info("【115 Emby 联动删除】还原 OpenList API 路径：%s", openlist_api_path)
-            self._remember_movie_dir(
-                media_name=media_name or transfer_history.title or Path(emby_path).stem,
-                emby_path=emby_path,
-                openlist_api_path=openlist_api_path,
-            )
+        delete_api_path, delete_is_dir = self._resolve_movie_delete_target(
+            media_name=media_name or transfer_history.title or Path(emby_path).stem,
+            emby_path=emby_path,
+            openlist_api_path=openlist_api_path,
+        )
         result_parts: List[str] = []
         if self._delete_p115_file:
-            logger.info("【115 Emby 联动删除】开始删除 115 文件：%s", p115_path)
+            logger.info(
+                "【115 Emby 联动删除】开始删除 115 %s：%s",
+                "目录" if delete_is_dir else "文件",
+                delete_api_path or p115_path,
+            )
             if self._delete_p115_file_item(
                 media_name=media_name,
                 p115_path=p115_path,
-                openlist_api_path=openlist_api_path,
+                openlist_api_path=delete_api_path,
+                openlist_is_dir=delete_is_dir,
             ):
-                result_parts.append("115 文件已删除")
+                result_parts.append(f"115 {'目录' if delete_is_dir else '文件'}已删除")
             else:
-                result_parts.append("115 文件删除失败")
+                result_parts.append(f"115 {'目录' if delete_is_dir else '文件'}删除失败")
 
         if self._delete_transfer_history and (
             not self._delete_p115_file or "115 文件已删除" in result_parts
@@ -709,31 +673,86 @@ class P115EmbySyncDel(_PluginBase):
             result=result_text,
         )
 
-    def _remember_movie_dir(
+    def _resolve_movie_delete_target(
         self,
         media_name: str,
         emby_path: str,
-        openlist_api_path: str,
-    ) -> None:
+        openlist_api_path: Optional[str],
+    ) -> Tuple[Optional[str], bool]:
         """
-        缓存电影目录删除上下文，供后续 Folder 事件命中。
+        解析电影删除目标。优先根据 Emby 电影目录名与 OpenList 上级目录名的关键词匹配决定是否删目录。
 
         :param media_name: 媒体名称。
         :param emby_path: Emby 文件路径。
         :param openlist_api_path: OpenList 文件路径。
+        :return: 删除目标路径与是否为目录。
         """
-        emby_dir = str(Path(emby_path).parent).replace("\\", "/")
+        if not openlist_api_path:
+            return None, False
+
+        if not self._delete_movie_dir:
+            logger.info("【115 Emby 联动删除】电影目录联动删除未启用，保持文件删除：%s", openlist_api_path)
+            return openlist_api_path, False
+
+        emby_dir_name = Path(emby_path).parent.name
         openlist_dir_path = str(Path(openlist_api_path).parent).replace("\\", "/")
-        self._recent_movie_dirs[emby_dir] = {
-            "media_name": media_name,
-            "openlist_dir_path": openlist_dir_path,
-            "saved_at": time.time(),
-        }
+        openlist_dir_name = Path(openlist_dir_path).name
+        if self._movie_dir_matches(
+            media_name=media_name,
+            emby_dir_name=emby_dir_name,
+            openlist_dir_name=openlist_dir_name,
+        ):
+            logger.info(
+                "【115 Emby 联动删除】命中电影目录删除规则：emby_dir=%s, openlist_dir=%s",
+                emby_dir_name,
+                openlist_dir_name,
+            )
+            return openlist_dir_path, True
+
         logger.info(
-            "【115 Emby 联动删除】已缓存电影目录上下文：emby_dir=%s, openlist_dir=%s",
-            emby_dir,
-            openlist_dir_path,
+            "【115 Emby 联动删除】未命中电影目录删除规则，保持文件删除：emby_dir=%s, openlist_dir=%s",
+            emby_dir_name,
+            openlist_dir_name,
         )
+        return openlist_api_path, False
+
+    @classmethod
+    def _movie_dir_matches(
+        cls,
+        media_name: str,
+        emby_dir_name: str,
+        openlist_dir_name: str,
+    ) -> bool:
+        """
+        判断 OpenList 上级目录是否应视为电影目录。
+
+        :param media_name: 媒体名称。
+        :param emby_dir_name: Emby 电影目录名。
+        :param openlist_dir_name: OpenList 上级目录名。
+        :return: 是否匹配为电影目录。
+        """
+        candidates = {
+            cls._normalize_movie_keyword(media_name),
+            cls._normalize_movie_keyword(emby_dir_name),
+        }
+        openlist_key = cls._normalize_movie_keyword(openlist_dir_name)
+        candidates = {item for item in candidates if item}
+        if not openlist_key or not candidates:
+            return False
+        return any(item in openlist_key for item in candidates)
+
+    @staticmethod
+    def _normalize_movie_keyword(value: str) -> str:
+        """
+        归一化电影名关键词，用于目录匹配。
+
+        :param value: 原始名称。
+        :return: 归一化结果。
+        """
+        normalized = value.lower().strip()
+        for token in (" ", "-", "_", "(", ")", "（", "）", "：", ":", ".", "{", "}", "[", "]"):
+            normalized = normalized.replace(token, "")
+        return normalized
 
     def _get_transfer_record(
         self,
@@ -840,6 +859,7 @@ class P115EmbySyncDel(_PluginBase):
         media_name: str,
         p115_path: str,
         openlist_api_path: Optional[str] = None,
+        openlist_is_dir: bool = False,
     ) -> bool:
         """
         删除 115 文件或目录。
@@ -847,10 +867,15 @@ class P115EmbySyncDel(_PluginBase):
         :param media_name: 媒体名称。
         :param p115_path: 115 网盘路径。
         :param openlist_api_path: OpenList API 路径。
+        :param openlist_is_dir: OpenList 删除目标是否为目录。
         :return: 是否删除成功。
         """
         if openlist_api_path and self._openlist_api_url and self._openlist_token:
-            if self._delete_via_openlist_api(media_name=media_name, openlist_api_path=openlist_api_path):
+            if self._delete_via_openlist_api(
+                media_name=media_name,
+                openlist_api_path=openlist_api_path,
+                is_dir=openlist_is_dir,
+            ):
                 return True
             logger.warning("【115 Emby 联动删除】OpenList API 删除失败，回退 StorageChain：%s", openlist_api_path)
 
