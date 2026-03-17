@@ -22,7 +22,7 @@ class P115EmbySyncDel(_PluginBase):
     plugin_name = "115 Emby 联动删除"
     plugin_desc = "通过神医助手删除 Emby 媒体时，同步删除 115 文件与 MoviePilot 整理记录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png"
-    plugin_version = "0.1.9"
+    plugin_version = "0.1.10"
     plugin_author = "Codex"
     author_url = "https://openai.com"
     plugin_config_prefix = "p115embysyncdel_"
@@ -629,6 +629,7 @@ class P115EmbySyncDel(_PluginBase):
             openlist_api_path=openlist_api_path,
         )
         result_parts: List[str] = []
+        delete_success = False
         if self._delete_p115_file:
             logger.info(
                 "【115 Emby 联动删除】开始删除 115 %s：%s",
@@ -641,12 +642,13 @@ class P115EmbySyncDel(_PluginBase):
                 openlist_api_path=delete_api_path,
                 openlist_is_dir=delete_is_dir,
             ):
+                delete_success = True
                 result_parts.append(f"115 {'目录' if delete_is_dir else '文件'}已删除")
             else:
                 result_parts.append(f"115 {'目录' if delete_is_dir else '文件'}删除失败")
 
         if self._delete_transfer_history and (
-            not self._delete_p115_file or "115 文件已删除" in result_parts
+            not self._delete_p115_file or delete_success
         ):
             self._transferhis.delete(transfer_history.id)
             result_parts.append("整理记录已删除")
