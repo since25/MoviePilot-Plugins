@@ -1,5 +1,6 @@
 import time
 import json
+import re
 from urllib import request as urllib_request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -22,7 +23,7 @@ class P115EmbySyncDel(_PluginBase):
     plugin_name = "115 Emby 联动删除"
     plugin_desc = "通过神医助手删除 Emby 媒体时，同步删除 115 文件与 MoviePilot 整理记录。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png"
-    plugin_version = "0.1.12"
+    plugin_version = "0.1.13"
     plugin_author = "Codex"
     author_url = "https://openai.com"
     plugin_config_prefix = "p115embysyncdel_"
@@ -34,6 +35,7 @@ class P115EmbySyncDel(_PluginBase):
     _delete_transfer_history = True
     _delete_p115_file = True
     _delete_movie_dir = True
+    _delete_tv_season_dir = True
     _emby_library_path = ""
     _openlist_url_prefix = ""
     _openlist_api_url = ""
@@ -65,6 +67,7 @@ class P115EmbySyncDel(_PluginBase):
         )
         self._delete_p115_file = bool(config.get("delete_p115_file", True))
         self._delete_movie_dir = bool(config.get("delete_movie_dir", True))
+        self._delete_tv_season_dir = bool(config.get("delete_tv_season_dir", True))
         self._emby_library_path = (config.get("emby_library_path") or "").strip()
         self._openlist_url_prefix = (config.get("openlist_url_prefix") or "").strip()
         self._openlist_api_url = (config.get("openlist_api_url") or "").strip()
@@ -83,6 +86,7 @@ class P115EmbySyncDel(_PluginBase):
                 "delete_transfer_history": self._delete_transfer_history,
                 "delete_p115_file": self._delete_p115_file,
                 "delete_movie_dir": self._delete_movie_dir,
+                "delete_tv_season_dir": self._delete_tv_season_dir,
                 "emby_library_path": self._emby_library_path,
                 "openlist_url_prefix": self._openlist_url_prefix,
                 "openlist_api_url": self._openlist_api_url,
@@ -198,6 +202,19 @@ class P115EmbySyncDel(_PluginBase):
                                             }
                                         ],
                                     },
+                                    {
+                                        "component": "VCol",
+                                        "props": {"cols": 12, "md": 4},
+                                        "content": [
+                                            {
+                                                "component": "VSwitch",
+                                                "props": {
+                                                    "model": "delete_tv_season_dir",
+                                                    "label": "电视剧整季联动删除",
+                                                },
+                                            }
+                                        ],
+                                    },
                                 ],
                             },
                             {
@@ -309,7 +326,7 @@ class P115EmbySyncDel(_PluginBase):
                                 "content": [
                                     {
                                         "component": "div",
-                                        "text": "当前版本只支持电影场景，且要求能在 MoviePilot 转移历史中精确命中整理后的 STRM 目标路径。",
+                                        "text": "当前版本支持电影、电视剧单集与整季删除，且要求能在 MoviePilot 转移历史中精确命中整理后的 STRM 目标路径。",
                                     },
                                     {
                                         "component": "div",
@@ -346,6 +363,7 @@ class P115EmbySyncDel(_PluginBase):
             "delete_transfer_history": True,
             "delete_p115_file": True,
             "delete_movie_dir": True,
+            "delete_tv_season_dir": True,
             "emby_library_path": "",
             "openlist_url_prefix": "",
             "openlist_api_url": "",
@@ -557,9 +575,21 @@ class P115EmbySyncDel(_PluginBase):
                 season_num=season_num,
                 episode_num=episode_num,
             )
+        elif self._is_tv_season_delete(event_data=event_data, media_type=media_type, emby_path=emby_path):
+            season_num = self._extract_season_num(event_data) or self._extract_season_num_from_path(emby_path)
+            logger.info(
+                "【115 Emby 联动删除】识别到电视剧整季删除：season=%s",
+                season_num or "unknown",
+            )
+            self._handle_tv_season_delete(
+                media_name=media_name,
+                emby_path=emby_path,
+                tmdb_id=tmdb_id,
+                season_num=season_num,
+            )
         else:
-            logger.info("【115 Emby 联动删除】当前仅处理电影和单集，跳过类型：%s", media_type or "unknown")
-            return schemas.Response(success=True, message=f"当前仅处理电影和单集，已忽略：{media_type or 'unknown'}")
+            logger.info("【115 Emby 联动删除】当前仅处理电影、电视剧单集和整季，跳过类型：%s", media_type or "unknown")
+            return schemas.Response(success=True, message=f"当前仅处理电影、电视剧单集和整季，已忽略：{media_type or 'unknown'}")
         return schemas.Response(success=True, message=f"{event_name} 事件处理完成")
 
     def _handle_movie_delete(
@@ -831,6 +861,154 @@ class P115EmbySyncDel(_PluginBase):
             result=result_text,
         )
 
+    def _handle_tv_season_delete(
+        self,
+        media_name: str,
+        emby_path: str,
+        tmdb_id: Optional[int],
+        season_num: Optional[int],
+    ) -> None:
+        """
+        处理电视剧整季删除。按季目录路径筛选转移记录，仅在 OpenList 侧能收敛到单一季目录时才执行目录删除。
+
+        :param media_name: 媒体名称。
+        :param emby_path: Emby 上报的季目录路径。
+        :param tmdb_id: TMDB ID。
+        :param season_num: 季号。
+        """
+        if not self._delete_tv_season_dir:
+            logger.info("【115 Emby 联动删除】电视剧整季联动删除未启用，跳过：%s", emby_path)
+            self._save_history(
+                media_name=media_name or Path(emby_path).name,
+                emby_path=emby_path,
+                p115_path="",
+                result="电视剧整季联动删除未启用",
+            )
+            return
+
+        logger.info(
+            "【115 Emby 联动删除】查询电视剧整季转移记录：title=%s, season_path=%s, tmdb=%s, season=%s",
+            media_name or "unknown",
+            emby_path,
+            tmdb_id or "unknown",
+            season_num or "unknown",
+        )
+        try:
+            transfer_histories = self._get_tv_season_transfer_records(
+                emby_path=emby_path,
+                tmdb_id=tmdb_id,
+                season_num=season_num,
+            )
+        except Exception as err:
+            logger.error("【115 Emby 联动删除】查询电视剧整季转移记录异常：%s", err, exc_info=True)
+            return
+
+        if not transfer_histories:
+            logger.warning("【115 Emby 联动删除】未找到电视剧整季转移记录：%s", emby_path)
+            self._save_history(
+                media_name=media_name or Path(emby_path).name,
+                emby_path=emby_path,
+                p115_path="",
+                result="未找到电视剧整季转移记录",
+            )
+            return
+
+        logger.info("【115 Emby 联动删除】命中电视剧整季转移记录：%s 条", len(transfer_histories))
+        openlist_api_paths: List[str] = []
+        p115_paths: List[str] = []
+        valid_histories: List[TransferHistory] = []
+
+        for transfer_history in transfer_histories:
+            src_path = str(getattr(transfer_history, "src", "") or "").replace("\\", "/")
+            dest_path = str(getattr(transfer_history, "dest", "") or "").replace("\\", "/")
+            logger.info(
+                "【115 Emby 联动删除】整季记录：id=%s, src=%s, dest=%s",
+                getattr(transfer_history, "id", "unknown"),
+                src_path or "unknown",
+                dest_path or "unknown",
+            )
+            if not src_path:
+                continue
+
+            openlist_url = self._read_strm_target(src_path)
+            if not openlist_url:
+                logger.warning("【115 Emby 联动删除】整季记录读取 STRM 失败，跳过：%s", src_path)
+                continue
+
+            openlist_api_path = self._convert_openlist_url_to_api_path(openlist_url)
+            p115_path = self._convert_openlist_url_to_pan_path(openlist_url)
+            if not openlist_api_path or not p115_path:
+                logger.warning("【115 Emby 联动删除】整季记录无法还原 OpenList/115 路径，跳过：%s", openlist_url)
+                continue
+
+            openlist_api_paths.append(openlist_api_path)
+            p115_paths.append(p115_path)
+            valid_histories.append(transfer_history)
+
+        if not openlist_api_paths or not valid_histories:
+            self._save_history(
+                media_name=media_name or Path(emby_path).name,
+                emby_path=emby_path,
+                p115_path="",
+                result="电视剧整季记录无法还原删除路径",
+            )
+            return
+
+        season_delete_path = self._resolve_tv_season_delete_target(openlist_api_paths)
+        if not season_delete_path:
+            logger.warning("【115 Emby 联动删除】整季记录映射到多个目录，已跳过目录删除：%s", openlist_api_paths)
+            self._save_history(
+                media_name=media_name or Path(emby_path).name,
+                emby_path=emby_path,
+                p115_path="",
+                result="电视剧整季映射到多个目录，未执行自动删除",
+            )
+            return
+
+        logger.info("【115 Emby 联动删除】开始删除电视剧整季目录：%s", season_delete_path)
+        result_parts: List[str] = []
+        delete_success = False
+        if self._delete_p115_file:
+            delete_success = self._delete_p115_file_item(
+                media_name=media_name or Path(emby_path).name,
+                p115_path=str(Path(p115_paths[0]).parent).replace("\\", "/"),
+                openlist_api_path=season_delete_path,
+                openlist_is_dir=True,
+            )
+            result_parts.append("115 整季目录已删除" if delete_success else "115 整季目录删除失败")
+
+        if self._delete_transfer_history and (not self._delete_p115_file or delete_success):
+            for transfer_history in valid_histories:
+                self._transferhis.delete(transfer_history.id)
+            result_parts.append(f"整理记录已删除({len(valid_histories)}条)")
+        elif self._delete_transfer_history:
+            result_parts.append("整理记录未删除")
+
+        result_text = "，".join(result_parts) if result_parts else "未执行删除动作"
+        logger.info(
+            "【115 Emby 联动删除】%s -> %s，结果：%s",
+            emby_path,
+            season_delete_path,
+            result_text,
+        )
+
+        if self._notify:
+            self.post_message(
+                mtype=NotificationType.Plugin,
+                title="115 Emby 联动删除完成",
+                text=f"{media_name or Path(emby_path).name}\n"
+                f"Emby 路径：{emby_path}\n"
+                f"OpenList 目录：{season_delete_path}\n"
+                f"结果：{result_text}",
+            )
+
+        self._save_history(
+            media_name=media_name or Path(emby_path).name,
+            emby_path=emby_path,
+            p115_path=str(Path(p115_paths[0]).parent).replace("\\", "/"),
+            result=result_text,
+        )
+
     def _resolve_movie_delete_target(
         self,
         media_name: str,
@@ -963,6 +1141,63 @@ class P115EmbySyncDel(_PluginBase):
                 return histories[0]
 
         return self._transferhis.get_by_dest(emby_path)
+
+    def _get_tv_season_transfer_records(
+        self,
+        emby_path: str,
+        tmdb_id: Optional[int],
+        season_num: Optional[int],
+    ) -> List[TransferHistory]:
+        """
+        查询电视剧整季转移记录，优先按 tmdb/season 命中，再按季目录前缀过滤。
+
+        :param emby_path: Emby 上报的季目录路径。
+        :param tmdb_id: TMDB ID。
+        :param season_num: 季号。
+        :return: 转移记录列表。
+        """
+        histories: List[TransferHistory] = []
+        if season_num:
+            query_kwargs: Dict[str, Any] = {
+                "mtype": MediaType.TV.value,
+                "season": f"S{season_num:02d}",
+            }
+            if tmdb_id:
+                query_kwargs["tmdbid"] = tmdb_id
+            histories = self._transferhis.get_by(**query_kwargs) or []
+
+        if not histories and tmdb_id:
+            histories = self._transferhis.get_by(
+                tmdbid=tmdb_id,
+                mtype=MediaType.TV.value,
+            ) or []
+
+        season_path = emby_path.rstrip("/").replace("\\", "/")
+        return [
+            history
+            for history in histories
+            if self._has_prefix(
+                str(getattr(history, "dest", "") or "").replace("\\", "/"),
+                season_path,
+            )
+        ]
+
+    @staticmethod
+    def _resolve_tv_season_delete_target(openlist_api_paths: List[str]) -> Optional[str]:
+        """
+        从整季各单集路径收敛出唯一季目录。若收敛失败则返回空，避免误删。
+
+        :param openlist_api_paths: 单集 OpenList API 路径列表。
+        :return: 整季目录路径。
+        """
+        parent_dirs = {
+            str(Path(path).parent).replace("\\", "/")
+            for path in openlist_api_paths
+            if path
+        }
+        if len(parent_dirs) == 1:
+            return next(iter(parent_dirs))
+        return None
 
     @staticmethod
     def _read_strm_target(src_path: str) -> Optional[str]:
@@ -1365,6 +1600,48 @@ class P115EmbySyncDel(_PluginBase):
             if episode_num is not None:
                 return episode_num
         return cls._safe_int(cls._event_raw_value(event_data, "episode_id"))
+
+    @classmethod
+    def _is_tv_season_delete(cls, event_data: Any, media_type: str, emby_path: str) -> bool:
+        """
+        判断当前事件是否应视为电视剧整季删除。
+
+        :param event_data: 事件数据。
+        :param media_type: 当前媒体类型。
+        :param emby_path: Emby 路径。
+        :return: 是否为整季删除。
+        """
+        if media_type == "Season":
+            return True
+        if media_type != "Folder":
+            return False
+        item = cls._event_raw_value(event_data, "item")
+        if isinstance(item, dict):
+            season_name = cls._event_value(item, "seasonname").strip()
+            if season_name:
+                return True
+        return cls._extract_season_num_from_path(emby_path) is not None
+
+    @staticmethod
+    def _extract_season_num_from_path(emby_path: str) -> Optional[int]:
+        """
+        从季目录路径中提取季号，兼容 Season 1 / S01 / 第1季 等常见格式。
+
+        :param emby_path: Emby 路径。
+        :return: 季号。
+        """
+        dir_name = Path(emby_path).name
+        patterns = [
+            r"season\s*([0-9]+)",
+            r"\bs([0-9]{1,2})\b",
+            r"第\s*([0-9]+)\s*季",
+            r"([0-9]+)\s*季",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, dir_name, re.IGNORECASE)
+            if match:
+                return P115EmbySyncDel._safe_int(match.group(1))
+        return None
 
     @staticmethod
     def _has_prefix(full_path: str, prefix_path: str) -> bool:
